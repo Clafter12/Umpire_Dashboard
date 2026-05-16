@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import io
-from PIL import Image, ImageDraw
 
 # Page Configuration
 
@@ -32,7 +30,21 @@ if uploaded_file is None:
 # Load CSV
 
 try:
-    df = pd.read_csv(uploaded_file, skiprows=1)
+
+    df = pd.read_csv(uploaded_file)
+
+    # If PitchNo is missing,
+    # retry while skipping first row
+
+    if "PitchNo" not in df.columns:
+
+        uploaded_file.seek(0)
+
+        df = pd.read_csv(
+            uploaded_file,
+            skiprows=1
+        )
+
 except Exception as e:
     st.error(f"Error loading CSV: {e}")
     st.stop()
@@ -46,9 +58,11 @@ df = df[df["PitchCall"].str.contains("Called", case=False, na=False)]
 def clean_name(name):
     if pd.isna(name):
         return name
+
     if "," in str(name):
         last, first = name.split(",", 1)
         return f"{first.strip()} {last.strip()}"
+
     return name
 
 df["Pitcher"] = df["Pitcher"].apply(clean_name)
@@ -78,8 +92,10 @@ team_map = {
 }
 
 def clean_team(team):
+
     if pd.isna(team):
         return team
+
     return team_map.get(str(team), str(team))
 
 df["PitcherTeam"] = df["PitcherTeam"].apply(clean_team)
@@ -104,27 +120,43 @@ CC_BUFFER = 0.99 * BASEBALL_DIAMETER
 # Strike zone logic
 
 def is_in_zone(row):
+
     return (
-        (ZONE_LEFT - BASEBALL_RADIUS) <= row["PlateLocSide"] <= (ZONE_RIGHT + BASEBALL_RADIUS)
+        (ZONE_LEFT - BASEBALL_RADIUS)
+        <= row["PlateLocSide"]
+        <= (ZONE_RIGHT + BASEBALL_RADIUS)
+
         and
-        (ZONE_BOTTOM - BASEBALL_RADIUS) <= row["PlateLocHeight"] <= (ZONE_TOP + BASEBALL_RADIUS)
+
+        (ZONE_BOTTOM - BASEBALL_RADIUS)
+        <= row["PlateLocHeight"]
+        <= (ZONE_TOP + BASEBALL_RADIUS)
     )
 
 df["InZone"] = df.apply(is_in_zone, axis=1)
 
 # Close-call logic
-# Close calls are pitches INSIDE the strike zone
-# and within .99 baseball widths of any edge
 
 def is_close_call(row):
 
     if not row["InZone"]:
         return False
 
-    left_distance = abs(row["PlateLocSide"] - (ZONE_LEFT - BASEBALL_RADIUS))
-    right_distance = abs((ZONE_RIGHT + BASEBALL_RADIUS) - row["PlateLocSide"])
-    bottom_distance = abs(row["PlateLocHeight"] - (ZONE_BOTTOM - BASEBALL_RADIUS))
-    top_distance = abs((ZONE_TOP + BASEBALL_RADIUS) - row["PlateLocHeight"])
+    left_distance = abs(
+        row["PlateLocSide"] - (ZONE_LEFT - BASEBALL_RADIUS)
+    )
+
+    right_distance = abs(
+        (ZONE_RIGHT + BASEBALL_RADIUS) - row["PlateLocSide"]
+    )
+
+    bottom_distance = abs(
+        row["PlateLocHeight"] - (ZONE_BOTTOM - BASEBALL_RADIUS)
+    )
+
+    top_distance = abs(
+        (ZONE_TOP + BASEBALL_RADIUS) - row["PlateLocHeight"]
+    )
 
     closest_edge = min(
         left_distance,
@@ -140,10 +172,13 @@ df["CloseCall"] = df.apply(is_close_call, axis=1)
 # Missed-call logic
 
 def is_missed_call(row):
+
     if row["InZone"] and row["PitchCall"] == "BallCalled":
         return True
+
     if not row["InZone"] and row["PitchCall"] == "StrikeCalled":
         return True
+
     return False
 
 df["MissedCall"] = df.apply(is_missed_call, axis=1)
@@ -222,8 +257,6 @@ if pitch_types:
     ]
 
 # Dynamic chart scaling
-# Automatically includes ALL pitches
-# while remaining true to scale
 
 x_min = filtered["PlateLocSide"].min()
 x_max = filtered["PlateLocSide"].max()
@@ -237,7 +270,6 @@ x_padding = 0.35
 y_padding = 0.35
 
 # Symmetrical horizontal scaling
-# keeps strike zone visually centered
 
 max_x = max(abs(x_min), abs(x_max)) + x_padding
 
@@ -260,29 +292,45 @@ missed_calls = filtered["MissedCall"].sum()
 correct_calls = total_pitches - missed_calls
 
 overall_accuracy = (
-    correct_calls / total_pitches * 100 if total_pitches > 0 else 0
+    correct_calls / total_pitches * 100
+    if total_pitches > 0 else 0
 )
 
-called_strikes = filtered[filtered["PitchCall"] == "StrikeCalled"]
-correct_called_strikes = called_strikes[called_strikes["InZone"]]
+called_strikes = filtered[
+    filtered["PitchCall"] == "StrikeCalled"
+]
+
+correct_called_strikes = called_strikes[
+    called_strikes["InZone"]
+]
 
 called_strike_accuracy = (
-    len(correct_called_strikes) / len(called_strikes) * 100
+    len(correct_called_strikes)
+    / len(called_strikes) * 100
     if len(called_strikes) > 0 else 0
 )
 
-called_balls = filtered[filtered["PitchCall"] == "BallCalled"]
-correct_called_balls = called_balls[called_balls["InZone"] == False]
+called_balls = filtered[
+    filtered["PitchCall"] == "BallCalled"
+]
+
+correct_called_balls = called_balls[
+    called_balls["InZone"] == False
+]
 
 called_ball_accuracy = (
-    len(correct_called_balls) / len(called_balls) * 100
+    len(correct_called_balls)
+    / len(called_balls) * 100
     if len(called_balls) > 0 else 0
 )
 
-called_balls_that_were_strikes = called_balls[called_balls["InZone"]]
+called_balls_that_were_strikes = called_balls[
+    called_balls["InZone"]
+]
 
 called_ball_strike_pct = (
-    len(called_balls_that_were_strikes) / len(called_balls) * 100
+    len(called_balls_that_were_strikes)
+    / len(called_balls) * 100
     if len(called_balls) > 0 else 0
 )
 
@@ -297,7 +345,8 @@ correct_close_calls = close_calls[
 ]
 
 close_call_accuracy = (
-    len(correct_close_calls) / len(close_calls) * 100
+    len(correct_close_calls)
+    / len(close_calls) * 100
     if len(close_calls) > 0 else 0
 )
 
@@ -311,22 +360,38 @@ col3.metric("Overall Accuracy %", f"{overall_accuracy:.1f}%")
 
 col4, col5, col6, col7, col8 = st.columns(5)
 
-col4.metric("Called Strike Accuracy", f"{called_strike_accuracy:.1f}%")
-col5.metric("Called Ball Accuracy", f"{called_ball_accuracy:.1f}%")
-col6.metric("% Called Balls That Were Strikes", f"{called_ball_strike_pct:.1f}%")
-col7.metric("Close Calls", len(close_calls))
-col8.metric("CC Correct %", f"{close_call_accuracy:.1f}%")
+col4.metric(
+    "Called Strike Accuracy",
+    f"{called_strike_accuracy:.1f}%"
+)
 
-# Selected pitch state
+col5.metric(
+    "Called Ball Accuracy",
+    f"{called_ball_accuracy:.1f}%"
+)
 
-if "selected_pitch" not in st.session_state:
-    st.session_state.selected_pitch = None
+col6.metric(
+    "% Called Balls That Were Strikes",
+    f"{called_ball_strike_pct:.1f}%"
+)
+
+col7.metric(
+    "Close Calls",
+    len(close_calls)
+)
+
+col8.metric(
+    "CC Correct %",
+    f"{close_call_accuracy:.1f}%"
+)
 
 # Missed calls table
 
 st.subheader("Missed Calls")
 
-missed_calls_df = filtered[filtered["MissedCall"]].copy()
+missed_calls_df = filtered[
+    filtered["MissedCall"]
+].copy()
 
 display_columns = [
     "Pitcher",
@@ -350,18 +415,13 @@ event = st.dataframe(
     selection_mode="single-row"
 )
 
-# Auto-clear highlight when unselected
+# Current selected pitch
+
+selected_pitch = None
 
 if event.selection.rows:
     idx = event.selection.rows[0]
-    st.session_state.selected_pitch = missed_calls_df.index[idx]
-else:
-    st.session_state.selected_pitch = None
-
-if st.session_state.selected_pitch is not None:
-    if st.button("Clear Highlight"):
-        st.session_state.selected_pitch = None
-        st.rerun()
+    selected_pitch = missed_calls_df.index[idx]
 
 # Strike zone chart
 
@@ -396,7 +456,11 @@ fig = px.scatter(
 )
 
 fig.update_traces(
-    marker=dict(size=18, line=dict(width=1, color="black"), opacity=0.85)
+    marker=dict(
+        size=18,
+        line=dict(width=1, color="black"),
+        opacity=0.85
+    )
 )
 
 # Add CC labels
@@ -423,9 +487,11 @@ fig.add_trace(
 
 # Highlight selected pitch
 
-if st.session_state.selected_pitch is not None:
-    if st.session_state.selected_pitch in filtered.index:
-        p = filtered.loc[st.session_state.selected_pitch]
+if selected_pitch is not None:
+
+    if selected_pitch in filtered.index:
+
+        p = filtered.loc[selected_pitch]
 
         fig.add_trace(
             go.Scatter(
@@ -435,7 +501,10 @@ if st.session_state.selected_pitch is not None:
                 marker=dict(
                     size=34,
                     color="yellow",
-                    line=dict(width=4, color="black")
+                    line=dict(
+                        width=4,
+                        color="black"
+                    )
                 ),
                 showlegend=False,
                 hovertemplate=(
@@ -456,7 +525,10 @@ fig.add_shape(
     y0=ZONE_BOTTOM,
     x1=ZONE_RIGHT,
     y1=ZONE_TOP,
-    line=dict(width=4, color="black")
+    line=dict(
+        width=4,
+        color="black"
+    )
 )
 
 fig.update_layout(
@@ -464,7 +536,12 @@ fig.update_layout(
     yaxis_title="Vertical Location",
     hovermode="closest",
     plot_bgcolor="white",
-    margin=dict(t=140, b=40, l=40, r=40)
+    margin=dict(
+        t=140,
+        b=40,
+        l=40,
+        r=40
+    )
 )
 
 stats_text = (
@@ -489,7 +566,6 @@ fig.add_annotation(
 )
 
 # True-scale chart axes
-# Dynamically includes all pitches
 
 fig.update_yaxes(
     scaleanchor="x",
@@ -501,18 +577,26 @@ fig.update_xaxes(
     range=x_range
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
 
 # Full dataset
 
 with st.expander("Full Dataset"):
-    st.dataframe(filtered, use_container_width=True)
+    st.dataframe(
+        filtered,
+        use_container_width=True
+    )
 
 # CSV export
 
 st.subheader("Download Cleaned Report")
 
-csv = filtered.to_csv(index=False).encode("utf-8")
+csv = filtered.to_csv(
+    index=False
+).encode("utf-8")
 
 st.download_button(
     "Download CSV Report",
