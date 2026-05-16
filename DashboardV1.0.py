@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 # Page Configuration
 
 st.set_page_config(
-    page_title="Interactive Umpire Analytics",
+    page_title="Umpire Dashboard",
     layout="wide"
 )
 
