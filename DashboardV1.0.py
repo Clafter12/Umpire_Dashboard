@@ -56,6 +56,7 @@ df = df[df["PitchCall"].str.contains("Called", case=False, na=False)]
 # Clean names
 
 def clean_name(name):
+
     if pd.isna(name):
         return name
 
@@ -115,7 +116,15 @@ BASEBALL_RADIUS = BASEBALL_DIAMETER / 2
 
 # Close-call buffer
 
-CC_BUFFER = 0.99 * BASEBALL_DIAMETER
+CC_BUFFER = 0.5 * BASEBALL_DIAMETER
+
+# Buffer zone dimensions
+# Visualizes the full close-call boundary
+
+BUFFER_LEFT = (ZONE_LEFT - BASEBALL_RADIUS) - CC_BUFFER
+BUFFER_RIGHT = (ZONE_RIGHT + BASEBALL_RADIUS) + CC_BUFFER
+BUFFER_BOTTOM = (ZONE_BOTTOM - BASEBALL_RADIUS) - CC_BUFFER
+BUFFER_TOP = (ZONE_TOP + BASEBALL_RADIUS) + CC_BUFFER
 
 # Strike zone logic
 
@@ -139,23 +148,66 @@ df["InZone"] = df.apply(is_in_zone, axis=1)
 
 def is_close_call(row):
 
-    if not row["InZone"]:
-        return False
+    x = row["PlateLocSide"]
+    y = row["PlateLocHeight"]
+
+    # Entire baseball boundaries
+
+    ball_left = x - BASEBALL_RADIUS
+    ball_right = x + BASEBALL_RADIUS
+    ball_bottom = y - BASEBALL_RADIUS
+    ball_top = y + BASEBALL_RADIUS
+
+    # Distances from entire baseball
+    # to strike zone edges
+
+    left_distance = abs(ball_right - ZONE_LEFT)
+    right_distance = abs(ZONE_RIGHT - ball_left)
+
+    bottom_distance = abs(ball_top - ZONE_BOTTOM)
+    top_distance = abs(ZONE_TOP - ball_bottom)
+
+    closest_edge = min(
+        left_distance,
+        right_distance,
+        bottom_distance,
+        top_distance
+    )
+
+    # Ball must be within expanded
+    # close-call boundary
+
+    within_buffer = (
+        BUFFER_LEFT <= x <= BUFFER_RIGHT
+        and
+        BUFFER_BOTTOM <= y <= BUFFER_TOP
+    )
+
+    return (
+        within_buffer
+        and
+        closest_edge <= CC_BUFFER
+    )
+
+    # Distances to expanded strike zone
 
     left_distance = abs(
         row["PlateLocSide"] - (ZONE_LEFT - BASEBALL_RADIUS)
     )
 
     right_distance = abs(
-        (ZONE_RIGHT + BASEBALL_RADIUS) - row["PlateLocSide"]
+        (ZONE_RIGHT + BASEBALL_RADIUS)
+        - row["PlateLocSide"]
     )
 
     bottom_distance = abs(
-        row["PlateLocHeight"] - (ZONE_BOTTOM - BASEBALL_RADIUS)
+        row["PlateLocHeight"]
+        - (ZONE_BOTTOM - BASEBALL_RADIUS)
     )
 
     top_distance = abs(
-        (ZONE_TOP + BASEBALL_RADIUS) - row["PlateLocHeight"]
+        (ZONE_TOP + BASEBALL_RADIUS)
+        - row["PlateLocHeight"]
     )
 
     closest_edge = min(
@@ -208,6 +260,13 @@ innings = st.sidebar.multiselect(
     sorted(df["Inning"].dropna().unique())
 )
 
+# Close-call only toggle
+
+close_call_only = st.sidebar.toggle(
+    "Only Close Calls",
+    value=False
+)
+
 filtered_stage1 = df.copy()
 
 if pitcher_teams:
@@ -254,6 +313,13 @@ filtered = filtered_stage3.copy()
 if pitch_types:
     filtered = filtered[
         filtered["TaggedPitchType"].isin(pitch_types)
+    ]
+
+# Apply close-call only filter
+
+if close_call_only:
+    filtered = filtered[
+        filtered["CloseCall"]
     ]
 
 # Dynamic chart scaling
@@ -528,6 +594,23 @@ fig.add_shape(
     line=dict(
         width=4,
         color="black"
+    )
+)
+
+# Buffer zone
+# Dotted black line represents
+# the full close-call boundary
+
+fig.add_shape(
+    type="rect",
+    x0=BUFFER_LEFT,
+    y0=BUFFER_BOTTOM,
+    x1=BUFFER_RIGHT,
+    y1=BUFFER_TOP,
+    line=dict(
+        width=2,
+        color="black",
+        dash="dot"
     )
 )
 
