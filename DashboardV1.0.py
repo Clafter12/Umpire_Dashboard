@@ -1,3 +1,9 @@
+# Umpire Analytics Dashboard
+# Author: Christian Lafter
+# Date: 6/2/26
+# Description: A Streamlit dashboard for analyzing umpire performance using Trackman CSV data. 
+# Supports direct CSV upload or FTP download from the Trackman server. Provides metrics, 
+# strike zone visualization, and missed call analysis.
 import io
 import datetime
 from ftplib import FTP, error_perm
@@ -7,6 +13,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import numpy as np
 
 # Page Configuration
 
@@ -24,6 +31,15 @@ Upload a Trackman CSV to begin:
 # FTP download helpers
 
 def _get_date_column(df):
+    # Prefer an explicit Date column, then any exact date-like column name, then any column containing "date".
+    exact_date = [col for col in df.columns if col.lower() == "date"]
+    if exact_date:
+        return exact_date[0]
+
+    exact_date_like = [col for col in df.columns if col.lower() in {"game date", "gamedate", "date game", "date"}]
+    if exact_date_like:
+        return exact_date_like[0]
+
     for col in df.columns:
         if "date" in col.lower():
             return col
@@ -144,11 +160,18 @@ def _filter_ftp_candidates(paths):
         "events",
         "stats"
     ]
-    matches = [
+    excluded = "playerpositioning"
+
+    # Do not filter by year anymore — only exclude unwanted filename patterns
+    filtered = [
         path for path in paths
+        if excluded not in path.lower()
+    ]
+    matches = [
+        path for path in filtered
         if any(keyword in path.lower() for keyword in keywords)
     ]
-    return sorted(matches or paths)
+    return sorted(matches or filtered)
 
 
 def _extract_date_from_filename(filename):
@@ -185,6 +208,79 @@ def _organize_files_by_date(file_list):
                 files_by_date[date] = []
             files_by_date[date].append(filepath)
     return files_by_date
+
+
+# Team mapping
+
+team_map = {
+    "EVA_OTT": "Evansville Otters",
+    "FLO_Y'A": "Florence Y'alls",
+    "LAK_ERI24": "Lake Erie Crushers",
+    "SCH_BOO": "Schaumburg Boomers",
+    "WIN_CIT29": "Windy City ThunderBolts",
+    "TRO_AIG": "Trois-Rivières Aigles",
+    "MIS_MUD": "Mississippi Mud Monsters",
+    "GAT_GRI": "Gateway Grizzlies",
+    "OTT_TIT": "Ottawa Titans",
+    "QUE_CAP": "Québec Capitales",
+    "SUS_COU1": "Sussex County Miners",
+    "DOW_EAS1": "Down East Bird Dawgs",
+    "NEW_YOR13": "New York Boulders",
+    "NEW_ENG23": "Brockton Rox",
+    "WAS_WIL3": "Washington Wild Things",
+    "TRI_VAL": "Tri-City ValleyCats",
+    "NEW_JER6": "New Jersey Jackals",
+    "JOL_SLA": "Joliet Slammers"
+}
+
+
+def clean_team(team):
+
+    if pd.isna(team):
+        return team
+
+    return team_map.get(str(team), str(team))
+
+
+def _extract_team_codes_from_filename(filename):
+    basename = os.path.splitext(os.path.basename(filename))[0]
+    search_text = basename.lower()
+    team_map_lower = {key.lower(): key for key in team_map.keys()}
+
+    found = []
+    for code_lower, original_key in team_map_lower.items():
+        idx = search_text.find(code_lower)
+        if idx >= 0:
+            found.append((idx, original_key))
+
+    found.sort(key=lambda item: item[0])
+    return [original_key for _, original_key in found]
+
+
+def _get_ftp_display_label(remote_path):
+    basename = os.path.splitext(os.path.basename(remote_path))[0]
+    lower_name = basename.lower()
+    unverified = "unverified" in lower_name
+
+    team_codes = _extract_team_codes_from_filename(basename)
+    if len(team_codes) >= 2:
+        away = clean_team(team_codes[0])
+        home = clean_team(team_codes[1])
+        label = f"{away} @ {home}"
+    elif len(team_codes) == 1:
+        away = clean_team(team_codes[0])
+        label = f"{away} @ Unknown"
+    else:
+        label = basename
+
+    if unverified:
+        label += " (Unverified)"
+
+    return label
+
+
+def _build_ftp_display_labels(paths):
+    return [_get_ftp_display_label(path) for path in paths]
 
 
 # Data source selection
@@ -241,12 +337,44 @@ if data_source == "FTP Download":
         key="ftp_scan_base"
     )
 
+    exclude_unverified = st.sidebar.checkbox(
+        "Exclude 'Unverified' files",
+        value=False,
+        key="ftp_exclude_unverified",
+        help="When checked, files with 'unverified' in the filename will be ignored during the scan."
+    )
+
     if st.sidebar.button("Scan FTP for CSV files", key="ftp_scan_button"):
         try:
             ftp = _connect_ftp(ftp_host, ftp_port, ftp_username, ftp_password)
             try:
                 scan_path = ftp_scan_base or "."
                 csv_files = _scan_ftp_for_csv(ftp, scan_path)
+
+                # Optionally remove files that include 'unverified' in the filename
+                excluded_unverified_count = 0
+                if exclude_unverified:
+                    pre_count = len(csv_files)
+                    csv_files = [f for f in csv_files if "unverified" not in f.lower()]
+                    excluded_unverified_count = pre_count - len(csv_files)
+
+                # Build diagnostics for scanned files: counts per year and undated files
+                year_counts = {}
+                undated = []
+                for p in csv_files:
+                    d = _extract_date_from_filename(p)
+                    if d:
+                        year_counts[d.year] = year_counts.get(d.year, 0) + 1
+                    else:
+                        undated.append(p)
+
+                st.session_state["ftp_scan_diag"] = {
+                    "total": len(csv_files),
+                    "year_counts": year_counts,
+                    "undated": undated,
+                    "excluded_unverified": excluded_unverified_count if 'excluded_unverified_count' in locals() else 0,
+                }
+
                 st.session_state["ftp_scan_results"] = _filter_ftp_candidates(csv_files)
                 
                 if not st.session_state["ftp_scan_results"]:
@@ -264,6 +392,8 @@ if data_source == "FTP Download":
             st.sidebar.error(f"FTP scan failed: {exc}")
 
     scan_results = st.session_state.get("ftp_scan_results", [])
+
+    # (Diagnostics removed) The FTP scan diagnostics panel was removed per user request.
 
     if scan_results:
         # Organize files by date for filtering
@@ -288,14 +418,19 @@ if data_source == "FTP Download":
             if files_for_date:
                 if len(files_for_date) == 1:
                     ftp_remote_path = files_for_date[0]
-                    st.sidebar.info(f"Selected: {ftp_remote_path}")
+                    st.sidebar.info(
+                        f"Selected: {_get_ftp_display_label(ftp_remote_path)}"
+                    )
                 else:
                     st.sidebar.write(f"**{len(files_for_date)} files found for this date**")
-                    ftp_remote_path = st.sidebar.selectbox(
+                    display_labels = _build_ftp_display_labels(files_for_date)
+                    selected_label = st.sidebar.selectbox(
                         "Choose file",
-                        files_for_date,
+                        display_labels,
                         key="ftp_csv_select"
                     )
+                    selected_index = display_labels.index(selected_label)
+                    ftp_remote_path = files_for_date[selected_index]
                 
                 if st.sidebar.button("Download selected FTP CSV", key="ftp_download_button"):
                     try:
@@ -315,11 +450,14 @@ if data_source == "FTP Download":
                 ftp_remote_path = None
         else:
             st.sidebar.warning("No dates found in filenames. Showing all files.")
-            ftp_remote_path = st.sidebar.selectbox(
-                "Choose FTP CSV to download",
-                scan_results,
+            display_labels = _build_ftp_display_labels(scan_results)
+            selected_label = st.sidebar.selectbox(
+                "Choose file",
+                display_labels,
                 key="ftp_csv_select"
             )
+            selected_index = display_labels.index(selected_label)
+            ftp_remote_path = scan_results[selected_index]
             
             if st.sidebar.button("Download selected FTP CSV", key="ftp_download_button"):
                 try:
@@ -414,36 +552,6 @@ else:
     st.error(f"Missing column: Batter. Available: {list(df.columns)}")
     st.stop()
 
-# Team mapping
-
-team_map = {
-    "EVA_OTT": "Evansville Otters",
-    "FLO_Y'A": "Florence Y'alls",
-    "LAK_ERI24": "Lake Erie Crushers",
-    "SCH_BOO": "Schaumburg Boomers",
-    "WIN_CIT29": "Windy City ThunderBolts",
-    "TRO_AIG": "Trois-Rivières Aigles",
-    "MIS_MUD": "Mississippi Mud Monsters",
-    "GAT_GRI": "Gateway Grizzlies",
-    "OTT_TIT": "Ottawa Titans",
-    "QUE_CAP": "Québec Capitales",
-    "SUS_COU1": "Sussex County Miners",
-    "DOW_EAS1": "Down East Bird Dawgs",
-    "NEW_YOR13": "New York Boulders",
-    "NEW_ENG23": "Brockton Rox",
-    "WAS_WIL3": "Washington Wild Things",
-    "TRI_VAL": "Tri-City ValleyCats",
-    "NEW_JER": "New Jersey Jackals",
-    "JOL_SLA": "Joliet Slammers"
-}
-
-def clean_team(team):
-
-    if pd.isna(team):
-        return team
-
-    return team_map.get(str(team), str(team))
-
 df["PitcherTeam"] = df["PitcherTeam"].apply(clean_team)
 df["BatterTeam"] = df["BatterTeam"].apply(clean_team)
 
@@ -472,22 +580,15 @@ BUFFER_BOTTOM = (ZONE_BOTTOM - BASEBALL_RADIUS) - CC_BUFFER
 BUFFER_TOP = (ZONE_TOP + BASEBALL_RADIUS) + CC_BUFFER
 
 # Strike zone logic
-
-def is_in_zone(row):
-
-    return (
-        (ZONE_LEFT - BASEBALL_RADIUS)
-        <= row["PlateLocSide"]
-        <= (ZONE_RIGHT + BASEBALL_RADIUS)
-
-        and
-
-        (ZONE_BOTTOM - BASEBALL_RADIUS)
-        <= row["PlateLocHeight"]
-        <= (ZONE_TOP + BASEBALL_RADIUS)
-    )
-
-df["InZone"] = df.apply(is_in_zone, axis=1)
+# Use vectorized boolean operations instead of per-row apply for performance.
+_x = df["PlateLocSide"]
+_y = df["PlateLocHeight"]
+df["InZone"] = (
+    (_x >= (ZONE_LEFT - BASEBALL_RADIUS))
+    & (_x <= (ZONE_RIGHT + BASEBALL_RADIUS))
+    & (_y >= (ZONE_BOTTOM - BASEBALL_RADIUS))
+    & (_y <= (ZONE_TOP + BASEBALL_RADIUS))
+)
 
 # Close-call logic
 
@@ -517,29 +618,14 @@ def is_close_call(row):
 df["CloseCall"] = df.apply(is_close_call, axis=1)
 
 # Missed-call logic
-
-def is_missed_call(row):
-
-    if row["InZone"] and row["PitchCall"] == "BallCalled":
-        return True
-
-    if not row["InZone"] and row["PitchCall"] == "StrikeCalled":
-        return True
-
-    return False
-
-df["MissedCall"] = df.apply(is_missed_call, axis=1)
+# Missed if ball was called when in zone, or strike was called when out of zone.
+df["MissedCall"] = (
+    (df["InZone"] & (df["PitchCall"] == "BallCalled"))
+    | ((~df["InZone"]) & (df["PitchCall"] == "StrikeCalled"))
+)
 
 # Call-result labeling
-
-def classify_call(row):
-
-    if row["MissedCall"]:
-        return "Missed Call"
-
-    return "Correct Call"
-
-df["CallResult"] = df.apply(classify_call, axis=1)
+df["CallResult"] = np.where(df["MissedCall"], "Missed Call", "Correct Call")
 
 # Detect and filter by game date
 
@@ -648,8 +734,18 @@ if close_call_only:
 filtered = filtered_stage3[filter_mask_final]
 
 # Dynamic chart scaling - Calculate once
-x_min, x_max = filtered["PlateLocSide"].min(), filtered["PlateLocSide"].max()
-y_min, y_max = filtered["PlateLocHeight"].min(), filtered["PlateLocHeight"].max()
+# Use the stage3 filtered dataset (before the close-call-only toggle) as the
+# default scale source so toggling "Only Close Calls" doesn't aggressively
+# shrink the axes. Fall back to `filtered` or strike-zone defaults when empty.
+scale_source = filtered_stage3 if (filtered_stage3 is not None and len(filtered_stage3) > 0) else filtered
+
+if scale_source is not None and len(scale_source) > 0:
+    x_min, x_max = scale_source["PlateLocSide"].min(), scale_source["PlateLocSide"].max()
+    y_min, y_max = scale_source["PlateLocHeight"].min(), scale_source["PlateLocHeight"].max()
+else:
+    # sensible defaults around the strike zone
+    x_min, x_max = ZONE_LEFT, ZONE_RIGHT
+    y_min, y_max = ZONE_BOTTOM, ZONE_TOP
 
 # Visual padding
 x_padding = 0.35
