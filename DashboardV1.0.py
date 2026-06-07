@@ -1,6 +1,6 @@
 # Umpire Analytics Dashboard
 # Author: Christian Lafter
-# Date: 6/2/26
+# Date: 6/7/26
 # Description: A Streamlit dashboard for analyzing umpire performance using Trackman CSV data. 
 # Supports direct CSV upload or FTP download from the Trackman server. Provides metrics, 
 # strike zone visualization, and missed call analysis.
@@ -14,6 +14,36 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
+
+# Timed sidebar messages: store in session_state with expiry timestamp
+def set_sidebar_message(text, kind="success", duration_seconds=20):
+    expiry = datetime.datetime.now().timestamp() + float(duration_seconds)
+    st.session_state["sidebar_message"] = {
+        "text": text,
+        "kind": kind,
+        "expiry": expiry,
+    }
+
+def render_sidebar_message():
+    msg = st.session_state.get("sidebar_message")
+    if msg:
+        if msg.get("expiry", 0) > datetime.datetime.now().timestamp():
+            kind = msg.get("kind", "info")
+            text = msg.get("text", "")
+            if kind == "success":
+                st.sidebar.success(text)
+            elif kind == "warning":
+                st.sidebar.warning(text)
+            elif kind == "error":
+                st.sidebar.error(text)
+            else:
+                st.sidebar.info(text)
+        else:
+            # expired
+            del st.session_state["sidebar_message"]
+
+# Render any active timed sidebar message
+render_sidebar_message()
 
 # Page Configuration
 
@@ -211,7 +241,6 @@ def _organize_files_by_date(file_list):
 
 
 # Team mapping
-
 team_map = {
     "EVA_OTT": "Evansville Otters",
     "FLO_Y'A": "Florence Y'alls",
@@ -284,7 +313,6 @@ def _build_ftp_display_labels(paths):
 
 
 # Data source selection
-
 data_source = st.sidebar.radio(
     "Data Source",
     ["Upload CSV", "FTP Download"]
@@ -293,146 +321,173 @@ data_source = st.sidebar.radio(
 uploaded_file = None
 
 if data_source == "FTP Download":
-    st.sidebar.header("FTP Settings")
+    with st.sidebar.expander("FTP Settings", expanded=True):
+        ftp_host = st.text_input(
+            "FTP Host",
+            value="ftp.trackmanbaseball.com",
+            disabled=True,
+            key="ftp_host"
+        )
 
-    ftp_host = st.sidebar.text_input(
-        "FTP Host",
-        value="ftp.trackmanbaseball.com",
-        disabled=True,
-        key="ftp_host"
-    )
+        ftp_port = st.number_input(
+            "Port",
+            value=21,
+            min_value=1,
+            max_value=65535,
+            key="ftp_port"
+        )
 
-    ftp_port = st.sidebar.number_input(
-        "Port",
-        value=21,
-        min_value=1,
-        max_value=65535,
-        key="ftp_port"
-    )
+        # FTP credentials - Direct credentials used for login
+        ftp_username = "Frontier League"
+        ftp_password = "VHq3wDSmJr"
 
-    # FTP credentials - Direct credentials used for login
-    ftp_username = "Frontier League"
-    ftp_password = "VHq3wDSmJr"
+        # Display only (does not overwrite actual credentials)
+        st.text_input(
+            "Username",
+            value=ftp_username,
+            disabled=True,
+            key="ftp_username_display"
+        )
 
-    # Display only (does not overwrite actual credentials)
-    st.sidebar.text_input(
-        "Username",
-        value=ftp_username,
-        disabled=True,
-        key="ftp_username_display"
-    )
+        st.text_input(
+            "Password",
+            value="********",
+            type="password",
+            disabled=True,
+            key="ftp_password_display"
+        )
 
-    st.sidebar.text_input(
-        "Password",
-        value="********",
-        type="password",
-        disabled=True,
-        key="ftp_password_display"
-    )
+        ftp_scan_base = st.text_input(
+            "FTP scan start directory",
+            value="",
+            help="Leave blank to scan the FTP root for CSV files.",
+            key="ftp_scan_base"
+        )
 
-    ftp_scan_base = st.sidebar.text_input(
-        "FTP scan start directory",
-        value="",
-        help="Leave blank to scan the FTP root for CSV files.",
-        key="ftp_scan_base"
-    )
+        exclude_unverified = st.checkbox(
+            "Exclude 'Unverified' files",
+            value=False,
+            key="ftp_exclude_unverified",
+            help="When checked, files with 'unverified' in the filename will be ignored during the scan."
+        )
 
-    exclude_unverified = st.sidebar.checkbox(
-        "Exclude 'Unverified' files",
-        value=False,
-        key="ftp_exclude_unverified",
-        help="When checked, files with 'unverified' in the filename will be ignored during the scan."
-    )
-
-    if st.sidebar.button("Scan FTP for CSV files", key="ftp_scan_button"):
-        try:
-            ftp = _connect_ftp(ftp_host, ftp_port, ftp_username, ftp_password)
+        if st.button("Scan FTP for CSV files", key="ftp_scan_button"):
             try:
-                scan_path = ftp_scan_base or "."
-                csv_files = _scan_ftp_for_csv(ftp, scan_path)
-
-                # Optionally remove files that include 'unverified' in the filename
-                excluded_unverified_count = 0
-                if exclude_unverified:
-                    pre_count = len(csv_files)
-                    csv_files = [f for f in csv_files if "unverified" not in f.lower()]
-                    excluded_unverified_count = pre_count - len(csv_files)
-
-                # Build diagnostics for scanned files: counts per year and undated files
-                year_counts = {}
-                undated = []
-                for p in csv_files:
-                    d = _extract_date_from_filename(p)
-                    if d:
-                        year_counts[d.year] = year_counts.get(d.year, 0) + 1
-                    else:
-                        undated.append(p)
-
-                st.session_state["ftp_scan_diag"] = {
-                    "total": len(csv_files),
-                    "year_counts": year_counts,
-                    "undated": undated,
-                    "excluded_unverified": excluded_unverified_count if 'excluded_unverified_count' in locals() else 0,
-                }
-
-                st.session_state["ftp_scan_results"] = _filter_ftp_candidates(csv_files)
-                
-                if not st.session_state["ftp_scan_results"]:
-                    st.sidebar.warning("No CSV files found during scan.")
-                else:
-                    st.sidebar.success(
-                        f"Found {len(st.session_state['ftp_scan_results'])} candidate CSV files."
-                    )
-            finally:
+                ftp = _connect_ftp(ftp_host, ftp_port, ftp_username, ftp_password)
                 try:
-                    ftp.quit()
-                except Exception:
-                    ftp.close()
-        except Exception as exc:
-            st.sidebar.error(f"FTP scan failed: {exc}")
+                    scan_path = ftp_scan_base or "."
+                    csv_files = _scan_ftp_for_csv(ftp, scan_path)
+
+                    # Optionally remove files that include 'unverified' in the filename
+                    excluded_unverified_count = 0
+                    if exclude_unverified:
+                        pre_count = len(csv_files)
+                        csv_files = [f for f in csv_files if "unverified" not in f.lower()]
+                        excluded_unverified_count = pre_count - len(csv_files)
+
+                    # Build diagnostics for scanned files: counts per year and undated files
+                    year_counts = {}
+                    undated = []
+                    for p in csv_files:
+                        d = _extract_date_from_filename(p)
+                        if d:
+                            year_counts[d.year] = year_counts.get(d.year, 0) + 1
+                        else:
+                            undated.append(p)
+
+                    st.session_state["ftp_scan_diag"] = {
+                        "total": len(csv_files),
+                        "year_counts": year_counts,
+                        "undated": undated,
+                        "excluded_unverified": excluded_unverified_count if 'excluded_unverified_count' in locals() else 0,
+                    }
+
+                    st.session_state["ftp_scan_results"] = _filter_ftp_candidates(csv_files)
+
+                    if not st.session_state["ftp_scan_results"]:
+                        st.sidebar.warning("No CSV files found during scan.")
+                    else:
+                        set_sidebar_message(
+                            f"Found {len(st.session_state['ftp_scan_results'])} candidate CSV files.",
+                            kind="success",
+                            duration_seconds=20,
+                        )
+                finally:
+                    try:
+                        ftp.quit()
+                    except Exception:
+                        try:
+                            ftp.close()
+                        except Exception:
+                            pass
+            except Exception as exc:
+                st.sidebar.error(f"FTP scan failed: {exc}")
 
     scan_results = st.session_state.get("ftp_scan_results", [])
-
-    # (Diagnostics removed) The FTP scan diagnostics panel was removed per user request.
 
     if scan_results:
         # Organize files by date for filtering
         files_by_date = _organize_files_by_date(scan_results)
         
         if files_by_date:
-            st.sidebar.subheader("Filter by Date")
-            
-            # Calendar picker for date selection
-            available_dates = sorted(files_by_date.keys())
-            selected_date = st.sidebar.date_input(
-                "Select Game Date",
-                value=available_dates[0] if available_dates else datetime.date.today(),
-                min_value=available_dates[0] if available_dates else datetime.date.today(),
-                max_value=available_dates[-1] if available_dates else datetime.date.today(),
-                key="ftp_date_select"
-            )
-            
-            # Get files for selected date
-            files_for_date = files_by_date.get(selected_date, [])
-            
-            if files_for_date:
-                if len(files_for_date) == 1:
-                    ftp_remote_path = files_for_date[0]
-                    st.sidebar.info(
-                        f"Selected: {_get_ftp_display_label(ftp_remote_path)}"
-                    )
+            with st.sidebar.expander("Filter by Date", expanded=False):
+                # Calendar picker for date selection
+                available_dates = sorted(files_by_date.keys())
+                selected_date = st.date_input(
+                    "Select Game Date",
+                    value=available_dates[0] if available_dates else datetime.date.today(),
+                    min_value=available_dates[0] if available_dates else datetime.date.today(),
+                    max_value=available_dates[-1] if available_dates else datetime.date.today(),
+                    key="ftp_date_select"
+                )
+
+                # Get files for selected date
+                files_for_date = files_by_date.get(selected_date, [])
+
+                if files_for_date:
+                    if len(files_for_date) == 1:
+                        ftp_remote_path = files_for_date[0]
+                        st.info(f"Selected: {_get_ftp_display_label(ftp_remote_path)}")
+                    else:
+                        st.write(f"**{len(files_for_date)} files found for this date**")
+                        display_labels = _build_ftp_display_labels(files_for_date)
+                        selected_label = st.selectbox(
+                            "Choose file",
+                            display_labels,
+                            key="ftp_csv_select"
+                        )
+                        selected_index = display_labels.index(selected_label)
+                        ftp_remote_path = files_for_date[selected_index]
+
+                    if st.button("Download selected FTP CSV", key="ftp_download_button"):
+                        try:
+                            ftp_file = _download_csv_from_ftp(
+                                ftp_host,
+                                ftp_port,
+                                ftp_username,
+                                ftp_password,
+                                ftp_remote_path
+                            )
+                            st.session_state["ftp_file_bytes"] = ftp_file.getvalue()
+                            set_sidebar_message("FTP CSV downloaded successfully.", kind="success", duration_seconds=20)
+                        except Exception as exc:
+                            st.error(f"FTP download failed: {exc}")
                 else:
-                    st.sidebar.write(f"**{len(files_for_date)} files found for this date**")
-                    display_labels = _build_ftp_display_labels(files_for_date)
-                    selected_label = st.sidebar.selectbox(
-                        "Choose file",
-                        display_labels,
-                        key="ftp_csv_select"
-                    )
-                    selected_index = display_labels.index(selected_label)
-                    ftp_remote_path = files_for_date[selected_index]
-                
-                if st.sidebar.button("Download selected FTP CSV", key="ftp_download_button"):
+                    st.warning(f"No files found for {selected_date.strftime('%Y-%m-%d')}. Try another date.")
+                    ftp_remote_path = None
+        else:
+            with st.sidebar.expander("Filter by Date", expanded=False):
+                st.warning("No dates found in filenames. Showing all files.")
+                display_labels = _build_ftp_display_labels(scan_results)
+                selected_label = st.selectbox(
+                    "Choose file",
+                    display_labels,
+                    key="ftp_csv_select"
+                )
+                selected_index = display_labels.index(selected_label)
+                ftp_remote_path = scan_results[selected_index]
+
+                if st.button("Download selected FTP CSV", key="ftp_download_button"):
                     try:
                         ftp_file = _download_csv_from_ftp(
                             ftp_host,
@@ -442,36 +497,9 @@ if data_source == "FTP Download":
                             ftp_remote_path
                         )
                         st.session_state["ftp_file_bytes"] = ftp_file.getvalue()
-                        st.sidebar.success("FTP CSV downloaded successfully.")
+                        set_sidebar_message("FTP CSV downloaded successfully.", kind="success", duration_seconds=20)
                     except Exception as exc:
-                        st.sidebar.error(f"FTP download failed: {exc}")
-            else:
-                st.sidebar.warning(f"No files found for {selected_date.strftime('%Y-%m-%d')}. Try another date.")
-                ftp_remote_path = None
-        else:
-            st.sidebar.warning("No dates found in filenames. Showing all files.")
-            display_labels = _build_ftp_display_labels(scan_results)
-            selected_label = st.sidebar.selectbox(
-                "Choose file",
-                display_labels,
-                key="ftp_csv_select"
-            )
-            selected_index = display_labels.index(selected_label)
-            ftp_remote_path = scan_results[selected_index]
-            
-            if st.sidebar.button("Download selected FTP CSV", key="ftp_download_button"):
-                try:
-                    ftp_file = _download_csv_from_ftp(
-                        ftp_host,
-                        ftp_port,
-                        ftp_username,
-                        ftp_password,
-                        ftp_remote_path
-                    )
-                    st.session_state["ftp_file_bytes"] = ftp_file.getvalue()
-                    st.sidebar.success("FTP CSV downloaded successfully.")
-                except Exception as exc:
-                    st.sidebar.error(f"FTP download failed: {exc}")
+                        st.error(f"FTP download failed: {exc}")
     else:
         ftp_remote_path = st.sidebar.text_input(
             "Remote file or directory",
@@ -484,7 +512,7 @@ if data_source == "FTP Download":
 
     if st.session_state.get("ftp_file_bytes") is not None:
         uploaded_file = io.BytesIO(st.session_state["ftp_file_bytes"])
-        st.sidebar.success("FTP CSV loaded from session.")
+        set_sidebar_message("FTP CSV loaded from session.", kind="success", duration_seconds=20)
     else:
         st.sidebar.info("After choosing a file, click Download selected FTP CSV.")
 
@@ -540,13 +568,13 @@ def clean_name(name):
 
 # --- SAFE NAME CLEANING (Pitcher/Batter) ---
 
-if "Pitcher" in df.columns:  # line ~235
+if "Pitcher" in df.columns:
     df["Pitcher"] = df["Pitcher"].apply(clean_name)
 else:
     st.error(f"Missing column: Pitcher. Available: {list(df.columns)}")
     st.stop()
 
-if "Batter" in df.columns:  # line ~241
+if "Batter" in df.columns:
     df["Batter"] = df["Batter"].apply(clean_name)
 else:
     st.error(f"Missing column: Batter. Available: {list(df.columns)}")
@@ -554,6 +582,16 @@ else:
 
 df["PitcherTeam"] = df["PitcherTeam"].apply(clean_team)
 df["BatterTeam"] = df["BatterTeam"].apply(clean_team)
+
+# Create pitch count field for filtering (e.g., "1-2") when Balls/Strikes exist
+if "Balls" in df.columns and "Strikes" in df.columns:
+    df["Count"] = (
+        df["Balls"].fillna(0).astype(int).astype(str)
+        + "-"
+        + df["Strikes"].fillna(0).astype(int).astype(str)
+    )
+else:
+    df["Count"] = np.nan
 
 # Strike zone constants
 
@@ -568,8 +606,8 @@ BASEBALL_DIAMETER = 2.94 / 12
 BASEBALL_RADIUS = BASEBALL_DIAMETER / 2
 
 # Close-call buffer
-
-CC_BUFFER = 0.5 * BASEBALL_DIAMETER
+# Use 1.69 inches as the close-call buffer (converted to feet)
+CC_BUFFER = 1.69 / 12
 
 # Buffer zone dimensions
 # Visualizes the full close-call boundary
@@ -591,31 +629,36 @@ df["InZone"] = (
 )
 
 # Close-call logic
+# Compute whether any part of the baseball is within CC_BUFFER of the strike zone edges
+_x = df["PlateLocSide"].astype(float)
+_y = df["PlateLocHeight"].astype(float)
 
-def is_close_call(row):
-    x = row["PlateLocSide"]
-    y = row["PlateLocHeight"]
+# Entire baseball boundaries
+ball_left = _x - BASEBALL_RADIUS
+ball_right = _x + BASEBALL_RADIUS
+ball_bottom = _y - BASEBALL_RADIUS
+ball_top = _y + BASEBALL_RADIUS
 
-    # Entire baseball boundaries
-    ball_left = x - BASEBALL_RADIUS
-    ball_right = x + BASEBALL_RADIUS
-    ball_bottom = y - BASEBALL_RADIUS
-    ball_top = y + BASEBALL_RADIUS
+# Distances from entire baseball to strike zone edges
+left_distance = (ball_right - ZONE_LEFT).abs()
+right_distance = (ZONE_RIGHT - ball_left).abs()
+bottom_distance = (ball_top - ZONE_BOTTOM).abs()
+top_distance = (ZONE_TOP - ball_bottom).abs()
 
-    # Distances from entire baseball to strike zone edges
-    left_distance = abs(ball_right - ZONE_LEFT)
-    right_distance = abs(ZONE_RIGHT - ball_left)
-    bottom_distance = abs(ball_top - ZONE_BOTTOM)
-    top_distance = abs(ZONE_TOP - ball_bottom)
+# Within expanded buffer box
+within_buffer = (
+    (_x >= BUFFER_LEFT) & (_x <= BUFFER_RIGHT) & (_y >= BUFFER_BOTTOM) & (_y <= BUFFER_TOP)
+)
 
-    closest_edge = min(left_distance, right_distance, bottom_distance, top_distance)
+# Close if any edge distance <= CC_BUFFER
+close_enough = (
+    (left_distance <= CC_BUFFER)
+    | (right_distance <= CC_BUFFER)
+    | (bottom_distance <= CC_BUFFER)
+    | (top_distance <= CC_BUFFER)
+)
 
-    # Ball must be within expanded close-call boundary
-    within_buffer = (BUFFER_LEFT <= x <= BUFFER_RIGHT and BUFFER_BOTTOM <= y <= BUFFER_TOP)
-
-    return within_buffer and closest_edge <= CC_BUFFER
-
-df["CloseCall"] = df.apply(is_close_call, axis=1)
+df["CloseCall"] = within_buffer & close_enough
 
 # Missed-call logic
 # Missed if ball was called when in zone, or strike was called when out of zone.
@@ -633,105 +676,116 @@ date_column = _get_date_column(df)
 if date_column is not None and _to_game_date(df, date_column):
     game_dates = sorted(df["GameDate"].dropna().unique())
     if game_dates:
-        if len(game_dates) == 1:
-            selected_date = st.sidebar.date_input(
-                "Select Game Date",
-                value=game_dates[0],
-                min_value=game_dates[0],
-                max_value=game_dates[0]
-            )
-            df = df[df["GameDate"] == selected_date]
-        else:
-            selected_range = st.sidebar.date_input(
-                "Select Game Date Range",
-                value=(game_dates[0], game_dates[-1]),
-                min_value=game_dates[0],
-                max_value=game_dates[-1]
-            )
-            if (
-                isinstance(selected_range, (list, tuple))
-                and len(selected_range) == 2
-            ):
-                start_date, end_date = selected_range
-                df = df[
-                    (df["GameDate"] >= start_date)
-                    & (df["GameDate"] <= end_date)
-                ]
-            else:
-                df = df[df["GameDate"] == selected_range]
-        st.sidebar.caption(f"Detected date field: {date_column}")
+        # Only show the date selector when not using FTP-download-loaded CSV
+        ftp_loaded = (data_source == "FTP Download" and st.session_state.get("ftp_file_bytes") is not None)
+        if not ftp_loaded:
+            with st.sidebar.expander("Filter by Date", expanded=False):
+                if len(game_dates) == 1:
+                    selected_date = st.date_input(
+                        "Select Game Date",
+                        value=game_dates[0],
+                        min_value=game_dates[0],
+                        max_value=game_dates[0]
+                    )
+                    df = df[df["GameDate"] == selected_date]
+                else:
+                    selected_range = st.date_input(
+                        "Select Game Date Range",
+                        value=(game_dates[0], game_dates[-1]),
+                        min_value=game_dates[0],
+                        max_value=game_dates[-1]
+                    )
+                    if (
+                        isinstance(selected_range, (list, tuple))
+                        and len(selected_range) == 2
+                    ):
+                        start_date, end_date = selected_range
+                        df = df[
+                            (df["GameDate"] >= start_date)
+                            & (df["GameDate"] <= end_date)
+                        ]
+                    else:
+                        df = df[df["GameDate"] == selected_range]
+            st.sidebar.caption(f"Detected date field: {date_column}")
 else:
     st.sidebar.caption(
         "No date field detected. Upload an FTP/CSV with a date column."
     )
 
-# Filters
-st.sidebar.header("Filters")
+# Filters (collapsed)
+with st.sidebar.expander("Filters", expanded=True):
+    pitcher_teams = st.multiselect(
+        "Pitcher Team",
+        sorted(df["PitcherTeam"].dropna().unique())
+    )
 
-pitcher_teams = st.sidebar.multiselect(
-    "Pitcher Team",
-    sorted(df["PitcherTeam"].dropna().unique())
-)
+    innings = st.multiselect(
+        "Inning",
+        sorted(df["Inning"].dropna().unique())
+    )
 
-innings = st.sidebar.multiselect(
-    "Inning",
-    sorted(df["Inning"].dropna().unique())
-)
+    # Close-call only toggle
+    close_call_only = st.toggle("Only Close Calls", value=False)
 
-# Close-call only toggle
-close_call_only = st.sidebar.toggle("Only Close Calls", value=False)
+    # Build filter mask efficiently
+    filter_mask = pd.Series([True] * len(df), index=df.index)
 
-# Build filter mask efficiently
-filter_mask = pd.Series([True] * len(df), index=df.index)
+    if pitcher_teams:
+        filter_mask &= df["PitcherTeam"].isin(pitcher_teams)
 
-if pitcher_teams:
-    filter_mask &= df["PitcherTeam"].isin(pitcher_teams)
+    if innings:
+        filter_mask &= df["Inning"].isin(innings)
 
-if innings:
-    filter_mask &= df["Inning"].isin(innings)
+    # Apply first-stage filters
+    filtered_stage1 = df[filter_mask]
 
-# Apply first-stage filters
-filtered_stage1 = df[filter_mask]
+    pitchers = st.multiselect(
+        "Pitcher",
+        sorted(filtered_stage1["Pitcher"].dropna().unique())
+    )
 
-pitchers = st.sidebar.multiselect(
-    "Pitcher",
-    sorted(filtered_stage1["Pitcher"].dropna().unique())
-)
+    filter_mask2 = pd.Series([True] * len(filtered_stage1), index=filtered_stage1.index)
 
-filter_mask2 = pd.Series([True] * len(filtered_stage1), index=filtered_stage1.index)
+    if pitchers:
+        filter_mask2 &= filtered_stage1["Pitcher"].isin(pitchers)
 
-if pitchers:
-    filter_mask2 &= filtered_stage1["Pitcher"].isin(pitchers)
+    filtered_stage2 = filtered_stage1[filter_mask2]
 
-filtered_stage2 = filtered_stage1[filter_mask2]
+    batters = st.multiselect(
+        "Batter",
+        sorted(filtered_stage2["Batter"].dropna().unique())
+    )
 
-batters = st.sidebar.multiselect(
-    "Batter",
-    sorted(filtered_stage2["Batter"].dropna().unique())
-)
+    filter_mask3 = pd.Series([True] * len(filtered_stage2), index=filtered_stage2.index)
 
-filter_mask3 = pd.Series([True] * len(filtered_stage2), index=filtered_stage2.index)
+    if batters:
+        filter_mask3 &= filtered_stage2["Batter"].isin(batters)
 
-if batters:
-    filter_mask3 &= filtered_stage2["Batter"].isin(batters)
+    filtered_stage3 = filtered_stage2[filter_mask3]
 
-filtered_stage3 = filtered_stage2[filter_mask3]
+    pitch_types = st.multiselect(
+        "Pitch Type",
+        sorted(filtered_stage3["TaggedPitchType"].dropna().unique())
+    )
 
-pitch_types = st.sidebar.multiselect(
-    "Pitch Type",
-    sorted(filtered_stage3["TaggedPitchType"].dropna().unique())
-)
+    counts = st.multiselect(
+        "Count",
+        sorted(filtered_stage3["Count"].dropna().unique())
+    )
 
-# Final filter with close-call toggle
-filter_mask_final = pd.Series([True] * len(filtered_stage3), index=filtered_stage3.index)
+    # Final filter with close-call toggle
+    filter_mask_final = pd.Series([True] * len(filtered_stage3), index=filtered_stage3.index)
 
-if pitch_types:
-    filter_mask_final &= filtered_stage3["TaggedPitchType"].isin(pitch_types)
+    if pitch_types:
+        filter_mask_final &= filtered_stage3["TaggedPitchType"].isin(pitch_types)
 
-if close_call_only:
-    filter_mask_final &= filtered_stage3["CloseCall"]
+    if close_call_only:
+        filter_mask_final &= filtered_stage3["CloseCall"]
 
-filtered = filtered_stage3[filter_mask_final]
+    if counts:
+        filter_mask_final &= filtered_stage3["Count"].isin(counts)
+
+    filtered = filtered_stage3[filter_mask_final]
 
 # Dynamic chart scaling - Calculate once
 # Use the stage3 filtered dataset (before the close-call-only toggle) as the
@@ -831,6 +885,24 @@ col8.metric(
     "CC Correct %",
     f"{close_call_accuracy:.1f}%"
 )
+
+# Umpire accuracy by count (collapsible)
+with st.expander("Umpire Accuracy by Count", expanded=False):
+    if "Count" in filtered.columns:
+        count_summary = (
+            filtered.groupby("Count").agg(
+                Total=("PitchCall", "count"),
+                Missed=("MissedCall", "sum"),
+            )
+            .assign(Accuracy=lambda d: (1 - d["Missed"] / d["Total"]) * 100)
+            .reset_index()
+            .sort_values(by="Total", ascending=False)
+        )
+
+        st.dataframe(count_summary, use_container_width=True)
+
+    else:
+        st.write("Count data not available in this dataset.")
 
 # Missed calls table
 
@@ -1030,7 +1102,6 @@ fig.add_annotation(
 )
 
 # True-scale chart axes
-
 fig.update_yaxes(
     scaleanchor="x",
     scaleratio=1,
@@ -1047,24 +1118,8 @@ st.plotly_chart(
 )
 
 # Full dataset
-
 with st.expander("Full Dataset"):
     st.dataframe(
         filtered,
         use_container_width=True
     )
-
-# CSV export
-
-st.subheader("Download Cleaned Report")
-
-csv = filtered.to_csv(
-    index=False
-).encode("utf-8")
-
-st.download_button(
-    "Download CSV Report",
-    data=csv,
-    file_name="umpire_report.csv",
-    mime="text/csv"
-)
